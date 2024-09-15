@@ -13,6 +13,7 @@ static void *setup(void)
 	return NULL;
 }
 
+/* test to get and free buffer (using csp_buffer_free) */
 ZTEST(buffer, test_buffer_count)
 {
 	csp_packet_t *packets[CSP_BUFFER_COUNT];
@@ -36,11 +37,13 @@ ZTEST(buffer, test_buffer_count)
 	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
 }
 
+/* test when the buffer limit is reached (using csp_buffer_free) */
 ZTEST(buffer, test_buffer_over_allocate)
 {
 	csp_packet_t *packets[CSP_BUFFER_COUNT];
 	csp_packet_t *p;
 	int i;
+	uint8_t buffer_out = csp_dbg_buffer_out;
 
 	memset(packets, 0, sizeof(packets));
 
@@ -52,10 +55,141 @@ ZTEST(buffer, test_buffer_over_allocate)
 	zassert_true(csp_buffer_remaining() == 0);
 	p = csp_buffer_get(0);
 	zassert_true(p == NULL, NULL);
+	zassert_equal(csp_dbg_buffer_out, (buffer_out+1));
 
 	for (i = 0; i < CSP_BUFFER_COUNT; i++) {
 		csp_buffer_free(packets[i]);
 	}
+}
+
+/* test to get and free buffer (using csp_buffer_get_isr) */
+ZTEST(buffer, test_buffer_count_isr)
+{
+	csp_packet_t *packets[CSP_BUFFER_COUNT];
+	int i;
+
+	memset(packets, 0, sizeof(packets));
+
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+
+	for (i = 0; i < CSP_BUFFER_COUNT; i++) {
+		packets[i] = csp_buffer_get_isr(0);
+		zassert_true(packets[i] != NULL, NULL);
+	}
+
+	zassert_true(csp_buffer_remaining() == 0);
+
+	for (i = 0; i < CSP_BUFFER_COUNT; i++) {
+		csp_buffer_free_isr(packets[i]);
+	}
+
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+}
+
+/* test when the buffer limit is reached (using csp_buffer_get_isr) */
+ZTEST(buffer, test_buffer_over_allocate_isr)
+{
+	csp_packet_t *packets[CSP_BUFFER_COUNT];
+	csp_packet_t *p;
+	int i;
+	uint8_t buffer_out = csp_dbg_buffer_out;
+
+	memset(packets, 0, sizeof(packets));
+
+	for (i = 0; i < CSP_BUFFER_COUNT; i++) {
+		packets[i] = csp_buffer_get_isr(0);
+		zassert_true(packets[i] != NULL, NULL);
+	}
+
+	zassert_true(csp_buffer_remaining() == 0);
+	p = csp_buffer_get_isr(0);
+	zassert_true(p == NULL, NULL);
+	zassert_equal(csp_dbg_buffer_out, (buffer_out+1));
+
+	for (i = 0; i < CSP_BUFFER_COUNT; i++) {
+		csp_buffer_free_isr(packets[i]);
+	}
+
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+}
+
+/* test to free corrupted buffer */
+ZTEST(buffer, test_buffer_free_error_corrupt_buffer)
+{
+	csp_packet_t packet;
+
+	memset(&packet, 0, sizeof(csp_packet_t));
+
+	csp_dbg_errno = 0;
+	csp_buffer_free(&packet);
+	zassert_equal(csp_dbg_errno, CSP_DBG_ERR_CORRUPT_BUFFER);
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+
+	csp_dbg_errno = 0;
+	csp_buffer_free_isr(&packet);
+	zassert_equal(csp_dbg_errno, CSP_DBG_ERR_CORRUPT_BUFFER);
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+
+	/* reset error flag */
+	csp_dbg_errno = 0;
+}
+
+/* test to free a freed buffer */
+ZTEST(buffer, test_buffer_free_error_already_free)
+{
+	csp_packet_t *packet;
+
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+
+	packet = csp_buffer_get(0);
+	zassert_not_null(packet);
+
+	csp_dbg_errno = 0;
+	csp_buffer_free(packet);
+	zassert_equal(csp_dbg_errno, 0);
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+
+	csp_dbg_errno = 0;
+	csp_buffer_free(packet);
+	zassert_equal(csp_dbg_errno, CSP_DBG_ERR_ALREADY_FREE);
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+	
+	csp_dbg_errno = 0;
+	csp_buffer_free_isr(packet);
+	zassert_equal(csp_dbg_errno, CSP_DBG_ERR_ALREADY_FREE);
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+
+	/* reset error flag */
+	csp_dbg_errno = 0;
+}
+
+/* test for freeing buffer with invalid reference counter */
+ZTEST(buffer, test_buffer_free_error_refcount)
+{
+	csp_packet_t *packet;
+
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+
+	packet = csp_buffer_get(0);
+	zassert_not_null(packet);
+
+	csp_buffer_refc_inc(packet);
+
+	csp_dbg_errno = 0;
+	csp_buffer_free(packet);
+	zassert_equal(csp_dbg_errno, CSP_DBG_ERR_REFCOUNT);
+
+	csp_buffer_refc_inc(packet);
+	
+	csp_dbg_errno = 0;
+	csp_buffer_free_isr(packet);
+	zassert_equal(csp_dbg_errno, CSP_DBG_ERR_REFCOUNT);
+
+	/* Free buffer */
+	csp_dbg_errno = 0;
+	csp_buffer_free(packet);
+	zassert_equal(csp_dbg_errno, 0);
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
 }
 
 /* test for buffer clone */
@@ -98,6 +232,8 @@ ZTEST(buffer, test_buffer_clone)
 		csp_buffer_free(packets[i]);
 		csp_buffer_free(clone[i]);
 	}
+
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
 }
 
 /* test when passing invalid arguments to clone function */
@@ -131,6 +267,34 @@ ZTEST(buffer, test_buffer_clone_limit_error)
 	for (i = 0; i < CSP_BUFFER_COUNT; i++) {
 		csp_buffer_free(packets[i]);
 	}
+
+	zassert_true(csp_buffer_remaining() == CSP_BUFFER_COUNT);
+}
+
+/* test when invalid arguments are given */
+ZTEST(buffer, test_buffer_refc_inc_error_invalid_pointer)
+{
+	csp_dbg_errno = 0;
+	csp_buffer_refc_inc(NULL);
+	zassert_equal(csp_dbg_errno, CSP_DBG_ERR_INVALID_POINTER);
+
+	/* reset error flag */
+	csp_dbg_errno = 0;
+}
+
+/* test to reference corrupted buffer */
+ZTEST(buffer, test_buffer_refc_inc_error_corrupt_buffer)
+{
+	csp_packet_t packet;
+
+	memset(&packet, 0, sizeof(csp_packet_t));
+
+	csp_dbg_errno = 0;
+	csp_buffer_refc_inc(&packet);
+	zassert_equal(csp_dbg_errno, CSP_DBG_ERR_CORRUPT_BUFFER);
+
+	/* reset error flag */
+	csp_dbg_errno = 0;
 }
 
 ZTEST_SUITE(buffer, NULL, setup, NULL, NULL, NULL);
